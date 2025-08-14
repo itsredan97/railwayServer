@@ -11,7 +11,7 @@ clients = {}             # websocket -> nickname
 client_keys = {}         # nickname -> chiave pubblica
 nickname_to_ws = {}      # nickname -> websocket attuale
 
-# Set per prevenire duplicati dei messaggi
+# Lista per prevenire duplicati dei messaggi (hash, timestamp)
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
 
@@ -32,7 +32,7 @@ async def cleanup_message_cache():
     """Rimuove vecchi messaggi dal set dei duplicati"""
     while True:
         now = time.time()
-        to_remove = {m for m, ts in recent_messages if now - ts > MESSAGE_CACHE_TIME}
+        to_remove = {m for m in recent_messages if now - m[1] > MESSAGE_CACHE_TIME}
         for m in to_remove:
             recent_messages.discard(m)
         await asyncio.sleep(10)
@@ -41,14 +41,17 @@ async def handler(websocket):
     try:
         nickname = await websocket.recv()
 
+        # Se nickname già connesso, disconnetti il vecchio websocket
         old_ws = nickname_to_ws.get(nickname)
         if old_ws:
             await disconnect_client(old_ws, notify=True)
 
+        # Aggiungi nuovo client
         clients[websocket] = nickname
         nickname_to_ws[nickname] = websocket
         print(f"[Sistema] Nuovo client connesso: {nickname}. Client totali: {len(clients)}")
 
+        # Notifica tutti gli altri utenti
         for client in clients:
             if client != websocket:
                 try:
@@ -62,12 +65,14 @@ async def handler(websocket):
                 if client_keys.get(nickname) != message:
                     client_keys[nickname] = message
                     print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
+                    # Invia la chiave pubblica appena ricevuta a tutti gli altri
                     for client in clients:
                         if client != websocket:
                             try:
                                 await client.send(message)
                             except websockets.ConnectionClosed:
                                 continue
+                # Invia tutte le chiavi esistenti al nuovo client
                 for other_nick, key in client_keys.items():
                     if other_nick != nickname:
                         try:
