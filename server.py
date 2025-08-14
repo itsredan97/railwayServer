@@ -16,7 +16,7 @@ async def disconnect_client(websocket):
         print(f"[Sistema] Client {nickname} disconnesso. Client totali: {len(clients)}")
         for client in clients:
             try:
-                await client.send(f"[Sistema] User {nickname} disconnected!")
+                await client.send(f"[Sistema] L'utente {nickname} si è disconnesso!")
             except:
                 pass
 
@@ -32,13 +32,12 @@ async def handler(websocket):
 
         # Aggiungi nuovo client
         clients[websocket] = nickname
-        print(f"[Sistema] Nuovo client connected: {nickname}. Client totali: {len(clients)}")
+        print(f"[Sistema] Nuovo client connesso: {nickname}. Client totali: {len(clients)}")
 
         # Notifica tutti gli altri utenti
         for client in clients:
             if client != websocket:
-                await client.send(f"[Sistema] User {nickname} connected!")
-
+                await client.send(f"[Sistema] L'utente {nickname} si è connesso!")
         async for message in websocket:
             # Chiave pubblica
             if message.startswith("-----BEGIN PUBLIC KEY-----"):
