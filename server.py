@@ -6,12 +6,9 @@ import time
 
 PORT = int(os.environ.get("PORT", 8080))
 
-# Map websocket -> nickname
 clients = {}             # websocket -> nickname
 client_keys = {}         # nickname -> chiave pubblica
 nickname_to_ws = {}      # nickname -> websocket attuale
-
-# Lista per prevenire duplicati dei messaggi (hash, timestamp)
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
 
@@ -23,8 +20,8 @@ async def disconnect_client(websocket, notify=True):
         if notify:
             for client in clients:
                 try:
-                    await client.send(f"[Sistema] L'utente {nickname} si è disconnesso!")
-                except websockets.ConnectionClosed:
+                    await safe_send(client, f"[Sistema] L'utente {nickname} si è disconnesso!")
+                except:
                     continue
         print(f"[Sistema] Client {nickname} disconnesso. Client totali: {len(clients)}")
 
@@ -37,16 +34,24 @@ async def cleanup_message_cache():
             recent_messages.discard(m)
         await asyncio.sleep(10)
 
+async def safe_send(client, message):
+    """Invio sicuro con retry su eventuali errori temporanei"""
+    for _ in range(3):
+        try:
+            await client.send(message)
+            return True
+        except websockets.ConnectionClosed:
+            await asyncio.sleep(0.1)
+    return False
+
 async def handler(websocket):
     try:
         nickname = await websocket.recv()
 
-        # Se nickname già connesso, disconnetti il vecchio websocket
         old_ws = nickname_to_ws.get(nickname)
         if old_ws:
             await disconnect_client(old_ws, notify=True)
 
-        # Aggiungi nuovo client
         clients[websocket] = nickname
         nickname_to_ws[nickname] = websocket
         print(f"[Sistema] Nuovo client connesso: {nickname}. Client totali: {len(clients)}")
@@ -54,10 +59,7 @@ async def handler(websocket):
         # Notifica tutti gli altri utenti
         for client in clients:
             if client != websocket:
-                try:
-                    await client.send(f"[Sistema] L'utente {nickname} si è connesso!")
-                except websockets.ConnectionClosed:
-                    continue
+                await safe_send(client, f"[Sistema] L'utente {nickname} si è connesso!")
 
         async for message in websocket:
             # Chiave pubblica
@@ -65,32 +67,19 @@ async def handler(websocket):
                 if client_keys.get(nickname) != message:
                     client_keys[nickname] = message
                     print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
-                    # Invia la chiave pubblica appena ricevuta a tutti gli altri
                     for client in clients:
                         if client != websocket:
-                            try:
-                                await client.send(message)
-                            except websockets.ConnectionClosed:
-                                continue
-                # Invia tutte le chiavi esistenti al nuovo client
+                            await safe_send(client, message)
                 for other_nick, key in client_keys.items():
                     if other_nick != nickname:
-                        try:
-                            await websocket.send(key)
-                        except websockets.ConnectionClosed:
-                            continue
+                        await safe_send(websocket, key)
             else:
                 # Calcola hash del messaggio per evitare duplicati
                 msg_hash = hashlib.sha256(message.encode()).hexdigest()
                 if msg_hash not in {m[0] for m in recent_messages}:
-                    # Inoltra il messaggio a tutti gli altri client
                     for client in clients:
                         if client != websocket:
-                            try:
-                                await client.send(message)
-                            except websockets.ConnectionClosed:
-                                continue
-                    # Aggiungi al set dei recenti
+                            await safe_send(client, message)
                     recent_messages.add((msg_hash, time.time()))
 
     except websockets.ConnectionClosed:
@@ -101,18 +90,17 @@ async def handler(websocket):
         await disconnect_client(websocket)
 
 async def main():
-    # Avvia task di pulizia dei messaggi duplicati
     asyncio.create_task(cleanup_message_cache())
-
     async with websockets.serve(
         handler,
         "0.0.0.0",
         PORT,
-        ping_interval=20,
-        ping_timeout=20
+        ping_interval=30,   # aumenta il ping per stabilità
+        ping_timeout=30
     ):
         print(f"[Sistema] Server WebSocket avviato sulla porta {PORT}")
-        await asyncio.Future()  # Mantiene il server vivo
+        await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
