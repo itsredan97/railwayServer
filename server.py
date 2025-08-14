@@ -1,37 +1,26 @@
-import socket
-import threading
+import os
+import asyncio
+import websockets
 
-HOST = "0.0.0.0"
-PORT = 5000
+PORT = int(os.environ.get("PORT", 5000))
+clients = set()
 
-clients = []
+async def handler(websocket, path):
+    clients.add(websocket)
+    try:
+        async for message in websocket:
+            # Invia il messaggio a tutti gli altri client
+            for client in clients:
+                if client != websocket:
+                    await client.send(message)
+    except:
+        pass
+    finally:
+        clients.remove(websocket)
 
-def handle_client(conn, idx):
-    while True:
-        try:
-            msg = conn.recv(4096)
-            if not msg:
-                break
-            # Invia a tutti tranne il mittente
-            for i, client in enumerate(clients):
-                if i != idx:
-                    try:
-                        client.send(msg)
-                    except:
-                        pass
-        except:
-            break
-    conn.close()
-    print(f"Client {idx} disconnesso.")
+start_server = websockets.serve(handler, "0.0.0.0", PORT)
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind((HOST, PORT))
-server.listen(10)
-print(f"Server avviato sulla porta {PORT}")
+print(f"Server WebSocket avviato sulla porta {PORT}")
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
 
-while True:
-    conn, addr = server.accept()
-    clients.append(conn)
-    idx = len(clients) - 1
-    print(f"Connesso: {addr}")
-    threading.Thread(target=handle_client, args=(conn, idx), daemon=True).start()
