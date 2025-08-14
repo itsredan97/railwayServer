@@ -5,15 +5,16 @@ import websockets
 PORT = int(os.environ.get("PORT", 8080))
 
 # Map websocket -> nickname
-clients = {}       # websocket -> nickname
-client_keys = {}   # nickname -> chiave pubblica
-nickname_to_ws = {}  # nickname -> websocket attuale
+clients = {}             # websocket -> nickname
+client_keys = {}         # nickname -> chiave pubblica
+nickname_to_ws = {}      # nickname -> websocket attuale
 
 async def disconnect_client(websocket, notify=True):
     """Rimuove un client e notifica gli altri utenti"""
     nickname = clients.pop(websocket, None)
     if nickname:
         nickname_to_ws.pop(nickname, None)
+        client_keys.pop(nickname, None)  # Rimuove la chiave pubblica
         if notify:
             for client in clients:
                 try:
@@ -48,16 +49,18 @@ async def handler(websocket):
         async for message in websocket:
             # Chiave pubblica
             if message.startswith("-----BEGIN PUBLIC KEY-----"):
-                client_keys[nickname] = message
-                print(f"[Sistema] Chiave pubblica ricevuta da {nickname}. Totale chiavi: {len(client_keys)}")
+                # Aggiorna la chiave solo se è diversa
+                if client_keys.get(nickname) != message:
+                    client_keys[nickname] = message
+                    print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
 
-                # Invia la chiave pubblica appena ricevuta a tutti gli altri
-                for client in clients:
-                    if client != websocket:
-                        try:
-                            await client.send(message)
-                        except websockets.ConnectionClosed:
-                            continue
+                    # Invia la chiave pubblica appena ricevuta a tutti gli altri
+                    for client in clients:
+                        if client != websocket:
+                            try:
+                                await client.send(message)
+                            except websockets.ConnectionClosed:
+                                continue
 
                 # Invia tutte le chiavi esistenti al nuovo client
                 for other_nick, key in client_keys.items():
@@ -85,9 +88,9 @@ async def handler(websocket):
 
 async def main():
     async with websockets.serve(
-        handler, 
-        "0.0.0.0", 
-        PORT, 
+        handler,
+        "0.0.0.0",
+        PORT,
         ping_interval=20,   # invia ping ogni 20 secondi
         ping_timeout=20     # timeout se non riceve pong
     ):
