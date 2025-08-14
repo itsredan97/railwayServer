@@ -3,35 +3,45 @@ import asyncio
 import websockets
 
 PORT = int(os.environ.get("PORT", 5000))
+
 clients = set()
-clients_keys = dict()  # websocket -> public key PEM
+client_keys = {}  # mappa websocket -> chiave pubblica
 
 async def handler(websocket):
     clients.add(websocket)
     print(f"[Sistema] Nuovo client connesso. Client totali: {len(clients)}")
+
+    # Invia le chiavi già presenti al nuovo client
+    for key_ws, key_data in client_keys.items():
+        try:
+            await websocket.send(f"[SYSTEM_KEY]{key_data}")
+        except:
+            pass
+
     try:
         async for message in websocket:
-            # Se è una chiave pubblica
-            if message.startswith("-----BEGIN PUBLIC KEY-----"):
-                clients_keys[websocket] = message
-                print(f"[Sistema] Chiave pubblica ricevuta da un client. Client con chiave: {len(clients_keys)}")
+            if message.startswith("[SYSTEM_KEY]"):
+                # Salva la chiave pubblica del client
+                key_data = message[len("[SYSTEM_KEY]"):]
+                client_keys[websocket] = key_data
+                print(f"[Sistema] Chiave pubblica ricevuta. Client con chiave: {len(client_keys)}")
                 
-                # Invia al nuovo client tutte le chiavi già presenti
-                for client, key in clients_keys.items():
+                # Invia questa chiave a tutti gli altri client
+                for client in clients:
                     if client != websocket:
-                        await websocket.send(key)
+                        await client.send(message)
             else:
-                # Invia il messaggio a tutti gli altri client
+                # Messaggio normale: inoltra a tutti tranne mittente
                 for client in clients:
                     if client != websocket:
                         await client.send(message)
     except websockets.ConnectionClosed:
-        print(f"[Sistema] Client disconnesso. Client rimanenti: {len(clients)-1}")
+        pass
     finally:
         clients.remove(websocket)
-        if websocket in clients_keys:
-            clients_keys.pop(websocket)
-            print(f"[Sistema] Chiave pubblica rimossa. Client con chiave: {len(clients_keys)}")
+        if websocket in client_keys:
+            del client_keys[websocket]
+        print(f"[Sistema] Client disconnesso. Client totali: {len(clients)}")
 
 async def main():
     async with websockets.serve(handler, "0.0.0.0", PORT):
@@ -40,4 +50,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
