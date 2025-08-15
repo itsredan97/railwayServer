@@ -9,7 +9,6 @@ PORT = int(os.environ.get("PORT", 8080))
 clients = {}             # websocket -> nickname
 client_keys = {}         # nickname -> chiave pubblica
 nickname_to_ws = {}      # nickname -> websocket attuale
-typing_status = {}  # nickname -> True/False
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
 
@@ -48,7 +47,6 @@ async def safe_send(client, message):
 async def handler(websocket):
     try:
         nickname = await websocket.recv()
-
         old_ws = nickname_to_ws.get(nickname)
         if old_ws:
             await disconnect_client(old_ws, notify=True)
@@ -62,33 +60,23 @@ async def handler(websocket):
             if client != websocket:
                 await safe_send(client, f"[Sistema] L'utente {nickname} si è connesso!")
 
-        # --- Ciclo principale ---
         async for message in websocket:
-            # Messaggi speciali typing
-            if message.startswith("#TYPING#ON"):
-                typing_status[nickname] = True
-                for client in clients:
-                    if client != websocket:
-                        await safe_send(client, f"[Sistema] {nickname} sta scrivendo…")
-                continue
-            elif message.startswith("#TYPING#OFF"):
-                typing_status[nickname] = False
-                for client in clients:
-                    if client != websocket:
-                        await safe_send(client, f"[Sistema] {nickname} ha smesso di scrivere")
-                continue
-
-            # --- Chiave pubblica ---
+            # Chiave pubblica
             if message.startswith("-----BEGIN PUBLIC KEY-----"):
                 if client_keys.get(nickname) != message:
                     client_keys[nickname] = message
                     print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
-                    for client in clients:
-                        if client != websocket:
-                            await safe_send(client, message)
+
+                # Invia la chiave pubblica a tutti gli altri client
+                for client in clients:
+                    if client != websocket:
+                        await safe_send(client, message)
+
+                # Invia tutte le chiavi esistenti al nuovo client
                 for other_nick, key in client_keys.items():
                     if other_nick != nickname:
                         await safe_send(websocket, key)
+
             else:
                 # Calcola hash del messaggio per evitare duplicati
                 msg_hash = hashlib.sha256(message.encode()).hexdigest()
@@ -104,18 +92,18 @@ async def handler(websocket):
         print(f"[Errore] {e}")
     finally:
         await disconnect_client(websocket)
-        
+
 async def main():
     asyncio.create_task(cleanup_message_cache())
     async with websockets.serve(
         handler,
         "0.0.0.0",
         PORT,
-        ping_interval=30,   # aumenta il ping per stabilità
+        ping_interval=30,  # aumenta il ping per stabilità
         ping_timeout=30
     ):
         print(f"[Sistema] Server WebSocket avviato sulla porta {PORT}")
-        await asyncio.Future()
+        await asyncio.Future()  # rimane in attesa infinita
 
 if __name__ == "__main__":
     asyncio.run(main())
