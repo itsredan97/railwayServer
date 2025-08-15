@@ -96,7 +96,7 @@ async def cleanup_task():
         await asyncio.sleep(10)
 
 
-async def handle_client(ws, path):
+async def handle_client(ws):
     nick = await authenticate(ws)
     if not nick:
         try:
@@ -183,7 +183,7 @@ async def handle_client(ws, path):
 
 async def main():
     cleanup = asyncio.create_task(cleanup_task())
-    async with websockets.serve(handle_client, "0.0.0.0", PORT, max_size=MAX_MSG_SIZE):
+    async with websockets.serve(handle_client, "0.0.0.0", PORT):
         log(f"[INFO] WebSocket server running on port {PORT}")
         await asyncio.Future()
     cleanup.cancel()
