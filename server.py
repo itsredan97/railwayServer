@@ -60,47 +60,47 @@ async def handler(websocket):
             if client != websocket:
                 await safe_send(client, f"[Sistema] L'utente {nickname} si è connesso!")
 
-try:
-    async for message in websocket:
-        # Chiave pubblica
-        if message.startswith("-----BEGIN PUBLIC KEY-----"):
-            if client_keys.get(nickname) != message:
-                client_keys[nickname] = message
-                print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
+        # 👇 qui inizia direttamente l'ascolto dei messaggi
+        async for message in websocket:
+            # Chiave pubblica
+            if message.startswith("-----BEGIN PUBLIC KEY-----"):
+                if client_keys.get(nickname) != message:
+                    client_keys[nickname] = message
+                    print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
 
-            # Invia la chiave pubblica a tutti gli altri client
-            for client in clients:
-                if client != websocket:
-                    await safe_send(client, message)
-
-            # Invia tutte le chiavi esistenti al nuovo client
-            for other_nick, key in client_keys.items():
-                if other_nick != nickname:
-                    await safe_send(websocket, key)
-
-        # Segnale di "sta scrivendo"
-        elif message.startswith("[TYPING]"):
-            for client in clients:
-                if client != websocket:
-                    await safe_send(client, message)
-            continue
-
-        # Messaggi normali
-        else:
-            # Calcola hash del messaggio per evitare duplicati
-            msg_hash = hashlib.sha256(message.encode()).hexdigest()
-            if msg_hash not in {m[0] for m in recent_messages}:
+                # Invia la chiave pubblica a tutti gli altri client
                 for client in clients:
                     if client != websocket:
                         await safe_send(client, message)
-                recent_messages.add((msg_hash, time.time()))
 
-except websockets.ConnectionClosed:
-    pass
-except Exception as e:
-    print(f"[Errore] {e}")
-finally:
-    await disconnect_client(websocket)
+                # Invia tutte le chiavi esistenti al nuovo client
+                for other_nick, key in client_keys.items():
+                    if other_nick != nickname:
+                        await safe_send(websocket, key)
+
+            # Segnale di "sta scrivendo"
+            elif message.startswith("[TYPING]"):
+                for client in clients:
+                    if client != websocket:
+                        await safe_send(client, message)
+                continue
+
+            # Messaggi normali
+            else:
+                # Calcola hash del messaggio per evitare duplicati
+                msg_hash = hashlib.sha256(message.encode()).hexdigest()
+                if msg_hash not in {m[0] for m in recent_messages}:
+                    for client in clients:
+                        if client != websocket:
+                            await safe_send(client, message)
+                    recent_messages.add((msg_hash, time.time()))
+
+    except websockets.ConnectionClosed:
+        pass
+    except Exception as e:
+        print(f"[Errore] {e}")
+    finally:
+        await disconnect_client(websocket)
 
 async def main():
     asyncio.create_task(cleanup_message_cache())
