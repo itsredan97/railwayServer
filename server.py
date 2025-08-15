@@ -1,34 +1,33 @@
 """
-Server WebSocket ottimizzato per chat.
-Miglioramenti implementati:
-- recent_messages: dict per lookup efficiente e cleanup semplice
-- safe_send con controllo websocket.closed e rimozione client non raggiungibili
-- broadcast parallelo con asyncio.gather e rimozione dei client morti
-- lock per modifiche sicure alle strutture condivise
-- gestione elegante di nickname duplicati (sostituzione della connessione precedente)
-- logging con timestamp
-- limitazione max_size per messaggi grandi
-- graceful shutdown
+Server WebSocket compatibile con il client SecureChat migliorato.
+Protocollo JSON usato:
+- Autenticazione in ingresso: {"type":"auth","token":...,"nickname":...}
+- Public key inviata dal client: {"type":"public_key","key": "-----BEGIN..."}
+  -> il server salva e ritrasmette a tutti gli altri: {"type":"public_key","from":nickname,"key":...}
+- Chat: {"type":"chat","content":"<base64 ciphertext>"}
+  -> il server inoltra: {"type":"chat","from":nickname,"content":"<base64>"}
+
+Il server include protezioni base: deduplicazione messaggi, gestione disconnessioni e logging.
 """
 
 import os
 import asyncio
 import websockets
+import json
 import hashlib
 import time
 from datetime import datetime
 
 PORT = int(os.environ.get("PORT", 8080))
-MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
-MAX_MSG_SIZE = 2 ** 20  # 1 MB
+MESSAGE_CACHE_TIME = 60
+MAX_MSG_SIZE = 2 ** 20
+AUTH_TOKEN = os.environ.get("SECURECHAT_TOKEN", "secure_token_123")
 
-# Strutture condivise
-clients = {}             # websocket -> nickname
-client_keys = {}         # nickname -> chiave pubblica
-nickname_to_ws = {}      # nickname -> websocket attuale
-recent_messages = {}     # msg_hash -> timestamp
-
-# Lock per proteggere le strutture condivise
+# Shared state
+clients = {}          # websocket -> nickname
+nickname_to_ws = {}   # nickname -> websocket
+client_keys = {}      # nickname -> pem string
+recent_messages = {}  # msg_hash -> timestamp
 state_lock = asyncio.Lock()
 
 
@@ -36,194 +35,162 @@ def log(msg: str):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
 
 
-async def remove_client(ws, notify=True):
-    """Rimuove il client dalle strutture condivise in modo sicuro."""
+async def disconnect_client(ws):
     async with state_lock:
-        nickname = clients.pop(ws, None)
-        if nickname:
-            # rimuovi mapping nickname -> ws solo se punta a questo ws
-            if nickname_to_ws.get(nickname) is ws:
-                nickname_to_ws.pop(nickname, None)
-            # non rimuoviamo la chiave pubblica automaticamente (si potrebbe volerla conservare)
+        nick = clients.pop(ws, None)
+        if nick:
+            if nickname_to_ws.get(nick) is ws:
+                nickname_to_ws.pop(nick, None)
+            client_keys.pop(nick, None)
+    if nick:
+        log(f"[INFO] {nick} disconnected")
+        # notify others
+        payload = json.dumps({"type": "system", "message": f"L'utente {nick} si è disconnesso!"})
+        await broadcast(payload, exclude_ws=None)
 
-    if nickname:
-        log(f"Client {nickname} rimosso. Client totali: {len(clients)}")
-        if notify:
-            await broadcast(f"[Sistema] L'utente {nickname} si è disconnesso!", exclude_ws=None)
 
-
-async def safe_send(client, message):
-    """Invio sicuro: ritorna True se inviato, False altrimenti."""
+async def safe_send(ws, payload):
     try:
-        if client.closed:
+        if ws.closed:
             return False
-        await client.send(message)
+        await ws.send(payload)
         return True
-    except websockets.ConnectionClosed:
-        return False
-    except Exception as e:
-        # altri errori non dovrebbero far crashare il server
-        log(f"[safe_send] Errore invio a client: {e}")
+    except Exception:
         return False
 
 
-async def broadcast(message, exclude_ws=None):
-    """Invia message a tutti i client connessi (escludendo exclude_ws). Rimuove i client morti."""
+async def broadcast(payload, exclude_ws=None):
     async with state_lock:
-        targets = [ws for ws in clients.keys() if ws != exclude_ws]
-
+        targets = [w for w in clients.keys() if w != exclude_ws]
     if not targets:
         return
-
-    # parallelizza gli invii
-    send_coros = [safe_send(ws, message) for ws in targets]
-    results = await asyncio.gather(*send_coros, return_exceptions=True)
-
-    # rimuove i client che hanno fallito
-    failed = []
-    for ws, res in zip(targets, results):
-        if isinstance(res, Exception) or res is False:
-            failed.append(ws)
-
-    for ws in failed:
-        # non notifica (notify=False) poiché il broadcast già copriva l'evento
-        await remove_client(ws, notify=False)
+    tasks = [safe_send(w, payload) for w in targets]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # cleanup failed
+    for w, r in zip(targets, results):
+        if isinstance(r, Exception) or r is False:
+            await disconnect_client(w)
 
 
-async def cleanup_message_cache_task():
-    """Task che periodicamente pulisce recent_messages"""
+async def authenticate(ws):
+    try:
+        raw = await ws.recv()
+        data = json.loads(raw)
+        if data.get("type") == "auth" and data.get("token") == AUTH_TOKEN:
+            nick = data.get("nickname")
+            return nick
+        else:
+            await ws.send(json.dumps({"type": "error", "message": "Unauthorized"}))
+            return None
+    except Exception:
+        return None
+
+
+async def cleanup_task():
     while True:
         now = time.time()
         async with state_lock:
-            # rimuovi gli hash più vecchi di MESSAGE_CACHE_TIME
-            keys_to_delete = [h for h, t in recent_messages.items() if now - t > MESSAGE_CACHE_TIME]
-            for k in keys_to_delete:
+            keys = [k for k, t in recent_messages.items() if now - t > MESSAGE_CACHE_TIME]
+            for k in keys:
                 recent_messages.pop(k, None)
         await asyncio.sleep(10)
 
 
-async def handler(websocket, path):
-    nickname = None
-    try:
-        # ricevi il nickname come primo messaggio (compatibile col client esistente)
-        nickname = await websocket.recv()
-        if not isinstance(nickname, str) or not nickname.strip():
-            await websocket.send("[Sistema] Nickname non valido. Connessione chiusa.")
-            await websocket.close()
-            return
-        nickname = nickname.strip()
+async def handle_client(ws, path):
+    nick = await authenticate(ws)
+    if not nick:
+        try:
+            await ws.close()
+        except:
+            pass
+        return
 
-        # Se esisteva un vecchio websocket per questo nickname, lo sostituiamo
-        async with state_lock:
-            old_ws = nickname_to_ws.get(nickname)
-            if old_ws and old_ws is not websocket:
-                # informiamo che il vecchio utente viene disconnesso
+    async with state_lock:
+        clients[ws] = nick
+        nickname_to_ws[nick] = ws
+    log(f"[INFO] {nick} connected")
+
+    # send existing public keys to the newly connected client
+    async with state_lock:
+        for other, key in client_keys.items():
+            if other != nick:
                 try:
-                    await old_ws.send("[Sistema] Una nuova connessione ha preso il tuo nickname. Verrai disconnesso.")
+                    await ws.send(json.dumps({"type": "public_key", "from": other, "key": key}))
                 except Exception:
                     pass
-                await remove_client(old_ws, notify=True)
+    # notify others
+    await broadcast(json.dumps({"type": "system", "message": f"L'utente {nick} si è connesso!"}), exclude_ws=ws)
 
-            # registra il nuovo client
-            clients[websocket] = nickname
-            nickname_to_ws[nickname] = websocket
-
-        log(f"Nuovo client connesso: {nickname}. Client totali: {len(clients)}")
-
-        # invia tutte le chiavi pubbliche esistenti al nuovo client (utile per crittografia lato client)
-        async with state_lock:
-            for other_nick, key in client_keys.items():
-                if other_nick != nickname:
-                    try:
-                        await websocket.send(key)
-                    except Exception:
-                        # non bloccare la connessione se il send fallisce
-                        pass
-
-        # notifica gli altri
-        await broadcast(f"[Sistema] L'utente {nickname} si è connesso!", exclude_ws=websocket)
-
-        async for message in websocket:
-            # protezione da messaggi troppo grandi (websockets può gestirla con max_size ma controllo aggiuntivo non fa male)
-            if isinstance(message, str) and len(message) > MAX_MSG_SIZE:
-                await websocket.send("[Sistema] Messaggio troppo grande.")
+    try:
+        async for raw in ws:
+            # protect from non-JSON or too large
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    raw = raw.decode()
+                except Exception:
+                    continue
+            if not isinstance(raw, str):
+                continue
+            if len(raw) > MAX_MSG_SIZE:
+                await ws.send(json.dumps({"type": "error", "message": "Message too large"}))
                 continue
 
-            # gestione chiave pubblica
-            if message.startswith("-----BEGIN PUBLIC KEY-----"):
-                async with state_lock:
-                    old_key = client_keys.get(nickname)
-                    if old_key != message:
-                        client_keys[nickname] = message
-                        log(f"Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
-                        # broadcast della nuova chiave a tutti gli altri
-                        await broadcast(message, exclude_ws=websocket)
-                # poi invia tutte le chiavi esistenti (già fatto alla connessione, ma nel caso aggiorniamo)
-                async with state_lock:
-                    for other_nick, key in client_keys.items():
-                        if other_nick != nickname:
-                            try:
-                                await websocket.send(key)
-                            except Exception:
-                                pass
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                # ignore non-json
                 continue
 
-            # messaggi normali: check duplicati tramite hash
-            msg_hash = hashlib.sha256(message.encode()).hexdigest()
-            now = time.time()
-            send_this = False
-            async with state_lock:
-                if msg_hash not in recent_messages:
-                    recent_messages[msg_hash] = now
-                    send_this = True
+            mtype = msg.get("type")
 
-            if send_this:
-                await broadcast(message, exclude_ws=websocket)
-            # altrimenti ignoriamo il duplicato
+            if mtype == "public_key":
+                key_pem = msg.get("key")
+                if not key_pem:
+                    continue
+                async with state_lock:
+                    client_keys[nick] = key_pem
+                # broadcast to others that this user published/updated key
+                payload = json.dumps({"type": "public_key", "from": nick, "key": key_pem})
+                await broadcast(payload, exclude_ws=ws)
+                continue
+
+            if mtype == "chat":
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    continue
+                # deduplicate via hash
+                msg_id = hashlib.sha256(content.encode()).hexdigest()
+                now = time.time()
+                async with state_lock:
+                    if msg_id in recent_messages:
+                        continue
+                    recent_messages[msg_id] = now
+                # broadcast chat
+                payload = json.dumps({"type": "chat", "from": nick, "content": content})
+                await broadcast(payload, exclude_ws=ws)
+                continue
+
+            # unknown type -> ignore or reply
+            await ws.send(json.dumps({"type": "error", "message": "Unknown message type"}))
 
     except websockets.ConnectionClosed:
-        log(f"Connessione chiusa: {nickname}")
+        log(f"[INFO] Connection closed: {nick}")
     except Exception as e:
-        log(f"[Errore handler] {e}")
+        log(f"[ERROR] handler {e}")
     finally:
-        # rimuovi il client (se presente)
-        if websocket.open:
-            try:
-                await websocket.close()
-            except Exception:
-                pass
-        await remove_client(websocket, notify=True)
+        await disconnect_client(ws)
 
 
 async def main():
-    # avvia task di pulizia
-    cleanup_task = asyncio.create_task(cleanup_message_cache_task())
-
-    server = await websockets.serve(
-        handler,
-        "0.0.0.0",
-        PORT,
-        ping_interval=30,
-        ping_timeout=30,
-        max_size=MAX_MSG_SIZE,
-    )
-
-    log(f"Server WebSocket avviato sulla porta {PORT}")
-
-    try:
-        await server.wait_closed()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        cleanup_task.cancel()
-        log("Server arrestato")
+    cleanup = asyncio.create_task(cleanup_task())
+    async with websockets.serve(handle_client, "0.0.0.0", PORT, max_size=MAX_MSG_SIZE):
+        log(f"[INFO] WebSocket server running on port {PORT}")
+        await asyncio.Future()
+    cleanup.cancel()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("[Sistema] Arresto manuale del server.")
-    except Exception as e:
-        log(f"[Sistema] Errore critico: {e}")
-
+        log("[INFO] Server stopped")
