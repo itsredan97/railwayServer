@@ -9,6 +9,7 @@ PORT = int(os.environ.get("PORT", 8080))
 clients = {}             # websocket -> nickname
 client_keys = {}         # nickname -> chiave pubblica
 nickname_to_ws = {}      # nickname -> websocket attuale
+typing_status = {}  # nickname -> True/False
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
 
@@ -61,26 +62,40 @@ async def handler(websocket):
             if client != websocket:
                 await safe_send(client, f"[Sistema] L'utente {nickname} si è connesso!")
 
-        async for message in websocket:
-            # Chiave pubblica
-            if message.startswith("-----BEGIN PUBLIC KEY-----"):
-                if client_keys.get(nickname) != message:
-                    client_keys[nickname] = message
-                    print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
-                    for client in clients:
-                        if client != websocket:
-                            await safe_send(client, message)
-                for other_nick, key in client_keys.items():
-                    if other_nick != nickname:
-                        await safe_send(websocket, key)
-            else:
-                # Calcola hash del messaggio per evitare duplicati
-                msg_hash = hashlib.sha256(message.encode()).hexdigest()
-                if msg_hash not in {m[0] for m in recent_messages}:
-                    for client in clients:
-                        if client != websocket:
-                            await safe_send(client, message)
-                    recent_messages.add((msg_hash, time.time()))
+async for message in websocket:
+    # Messaggi speciali typing
+    if message.startswith("#TYPING#ON"):
+        typing_status[nickname] = True
+        for client in clients:
+            if client != websocket:
+                await safe_send(client, f"[Sistema] {nickname} sta scrivendo…")
+        continue
+    elif message.startswith("#TYPING#OFF"):
+        typing_status[nickname] = False
+        for client in clients:
+            if client != websocket:
+                await safe_send(client, f"[Sistema] {nickname} ha smesso di scrivere")
+        continue
+
+    # Chiave pubblica
+    if message.startswith("-----BEGIN PUBLIC KEY-----"):
+        if client_keys.get(nickname) != message:
+            client_keys[nickname] = message
+            print(f"[Sistema] Chiave pubblica aggiornata da {nickname}. Totale chiavi: {len(client_keys)}")
+            for client in clients:
+                if client != websocket:
+                    await safe_send(client, message)
+        for other_nick, key in client_keys.items():
+            if other_nick != nickname:
+                await safe_send(websocket, key)
+    else:
+        # Calcola hash del messaggio per evitare duplicati
+        msg_hash = hashlib.sha256(message.encode()).hexdigest()
+        if msg_hash not in {m[0] for m in recent_messages}:
+            for client in clients:
+                if client != websocket:
+                    await safe_send(client, message)
+            recent_messages.add((msg_hash, time.time()))
 
     except websockets.ConnectionClosed:
         pass
