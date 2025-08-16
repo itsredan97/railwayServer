@@ -27,6 +27,7 @@ async def disconnect_client(websocket, notify=True):
                     continue
         print(f"[Sistema] Client {nickname} disconnesso. Client totali: {len(clients)}")
 
+
 async def cleanup_message_cache():
     """Rimuove vecchi messaggi dal set dei duplicati"""
     while True:
@@ -35,6 +36,7 @@ async def cleanup_message_cache():
         for m in to_remove:
             recent_messages.discard(m)
         await asyncio.sleep(10)
+
 
 async def safe_send(client, message):
     """Invio sicuro con retry su eventuali errori temporanei"""
@@ -45,6 +47,7 @@ async def safe_send(client, message):
         except websockets.ConnectionClosed:
             await asyncio.sleep(0.1)
     return False
+
 
 async def handler(websocket):
     try:
@@ -85,6 +88,7 @@ async def handler(websocket):
                 except Exception as e:
                     print(f"[Errore parsing PUBKEY]: {e}")
                 continue
+
             # --- Messaggio DM cifrato ---
             elif message.startswith("[DM]:"):
                 try:
@@ -109,7 +113,8 @@ async def handler(websocket):
             
                 except Exception as e:
                     print(f"[Errore DM]: {e}")
-            
+
+            # --- Fine chat privata ---
             elif message.startswith("[END_CHAT]:"):
                 ended_nick = message[len("[END_CHAT]:"):].strip()
                 sender_nick = clients.get(websocket, "unknown")
@@ -117,12 +122,13 @@ async def handler(websocket):
                 if busy_users.get(ended_nick) == sender_nick:
                     busy_users.pop(ended_nick)
 
+            # --- Controllo disponibilità ---
             elif message.startswith("[CHECK_BUSY]:"):
-            dest_nick = message[len("[CHECK_BUSY]:"):].strip()
-            if dest_nick in busy_users:
-                await safe_send(websocket, f"[BUSY]:{dest_nick}")
-            else:
-                await safe_send(websocket, f"[FREE]:{dest_nick}")            
+                dest_nick = message[len("[CHECK_BUSY]:"):].strip()
+                if dest_nick in busy_users:
+                    await safe_send(websocket, f"[BUSY]:{dest_nick}")
+                else:
+                    await safe_send(websocket, f"[FREE]:{dest_nick}")
 
             # --- Messaggi broadcast legacy ---
             else:
@@ -140,6 +146,7 @@ async def handler(websocket):
     finally:
         await disconnect_client(websocket)
 
+
 async def main():
     asyncio.create_task(cleanup_message_cache())
     async with websockets.serve(
@@ -152,6 +159,6 @@ async def main():
         print(f"[Sistema] Server WebSocket avviato sulla porta {PORT}")
         await asyncio.Future()  # rimane in attesa infinita
 
+
 if __name__ == "__main__":
     asyncio.run(main())
-
