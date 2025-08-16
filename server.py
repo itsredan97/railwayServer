@@ -11,7 +11,8 @@ client_keys = {}         # nickname -> chiave pubblica PEM
 nickname_to_ws = {}      # nickname -> websocket attuale
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
-busy_users = set()  # traccia nickname occupati in DM
+busy_users = {}  # chiave = destinatario, valore = chi ha aperto la chat
+
 
 async def disconnect_client(websocket, notify=True):
     nickname = clients.pop(websocket, None)
@@ -92,14 +93,13 @@ async def handler(websocket):
                     dest_nick = dest_nick.strip()
                     sender_nick = clients.get(websocket, "unknown")
             
-                    # Controlla se il destinatario è già in chat
-                    if dest_nick in busy_users:
+                    # Controlla se il destinatario è già in chat con un altro
+                    if dest_nick in busy_users and busy_users[dest_nick] != sender_nick:
                         await safe_send(websocket, f"[BUSY]:{dest_nick}")
                         continue
             
-                    # Segna mittente e destinatario come occupati (solo se non già in busy)
-                    busy_users.add(dest_nick)
-                    busy_users.add(sender_nick)
+                    # Segna destinatario come occupato con questo mittente
+                    busy_users[dest_nick] = sender_nick
             
                     # Invia DM solo al destinatario
                     dest_ws = nickname_to_ws.get(dest_nick)
@@ -113,15 +113,16 @@ async def handler(websocket):
             elif message.startswith("[END_CHAT]:"):
                 ended_nick = message[len("[END_CHAT]:"):].strip()
                 sender_nick = clients.get(websocket, "unknown")
-                busy_users.discard(ended_nick)
-                busy_users.discard(sender_nick)
-            
+                # Rimuovi solo se il mittente corrisponde
+                if busy_users.get(ended_nick) == sender_nick:
+                    busy_users.pop(ended_nick)
+
             elif message.startswith("[CHECK_BUSY]:"):
-                dest_nick = message[len("[CHECK_BUSY]:"):].strip()
-                if dest_nick in busy_users:
-                    await safe_send(websocket, f"[BUSY]:{dest_nick}")
-                else:
-                    await safe_send(websocket, f"[FREE]:{dest_nick}")
+            dest_nick = message[len("[CHECK_BUSY]:"):].strip()
+            if dest_nick in busy_users:
+                await safe_send(websocket, f"[BUSY]:{dest_nick}")
+            else:
+                await safe_send(websocket, f"[FREE]:{dest_nick}")            
 
             # --- Messaggi broadcast legacy ---
             else:
