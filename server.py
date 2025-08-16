@@ -11,6 +11,7 @@ client_keys = {}         # nickname -> chiave pubblica PEM
 nickname_to_ws = {}      # nickname -> websocket attuale
 recent_messages = set()
 MESSAGE_CACHE_TIME = 60  # secondi per mantenere l'ID del messaggio
+busy_users = set()  # traccia nickname occupati in DM
 
 async def disconnect_client(websocket, notify=True):
     nickname = clients.pop(websocket, None)
@@ -83,32 +84,38 @@ async def handler(websocket):
                 except Exception as e:
                     print(f"[Errore parsing PUBKEY]: {e}")
                 continue
-
             # --- Messaggio DM cifrato ---
             elif message.startswith("[DM]:"):
                 try:
                     _, rest = message.split(":", 1)
                     dest_nick, payload_b64 = rest.split(":", 1)
                     dest_nick = dest_nick.strip()
-
-                    # Invia solo al destinatario se online
+            
+                    sender_nick = clients.get(websocket, "unknown")
+            
+                    # Controlla se il destinatario è già in chat
+                    if dest_nick in busy_users:
+                        # Notifica mittente che il partner è occupato
+                        await safe_send(websocket, f"[BUSY]:{dest_nick}")
+                        continue
+            
+                    # Segna mittente e destinatario come occupati
+                    busy_users.add(dest_nick)
+                    busy_users.add(sender_nick)
+            
+                    # Invia DM solo al destinatario
                     dest_ws = nickname_to_ws.get(dest_nick)
                     if dest_ws:
-                        sender_nick = clients.get(websocket, "unknown")
                         dm_message = f"[DM]:{sender_nick}:{payload_b64}"
                         await safe_send(dest_ws, dm_message)
-                    continue
-
+            
                 except Exception as e:
                     print(f"[Errore DM]: {e}")
-                    continue
+                finally:
+                    # Libera gli utenti dall'occupato (opzionale: dopo conferma ricezione)
+                    busy_users.discard(sender_nick)
+                    busy_users.discard(dest_nick)
 
-            # --- Segnale di "sta scrivendo" ---
-            elif message.startswith("[TYPING]"):
-                for client in clients:
-                    if client != websocket:
-                        await safe_send(client, message)
-                continue
 
             # --- Messaggi broadcast legacy ---
             else:
