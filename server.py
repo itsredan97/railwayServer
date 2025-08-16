@@ -90,16 +90,14 @@ async def handler(websocket):
                     _, rest = message.split(":", 1)
                     dest_nick, payload_b64 = rest.split(":", 1)
                     dest_nick = dest_nick.strip()
-            
                     sender_nick = clients.get(websocket, "unknown")
             
                     # Controlla se il destinatario è già in chat
                     if dest_nick in busy_users:
-                        # Notifica mittente che il partner è occupato
                         await safe_send(websocket, f"[BUSY]:{dest_nick}")
                         continue
             
-                    # Segna mittente e destinatario come occupati
+                    # Segna mittente e destinatario come occupati (solo se non già in busy)
                     busy_users.add(dest_nick)
                     busy_users.add(sender_nick)
             
@@ -111,11 +109,19 @@ async def handler(websocket):
             
                 except Exception as e:
                     print(f"[Errore DM]: {e}")
-                finally:
-                    # Libera gli utenti dall'occupato (opzionale: dopo conferma ricezione)
-                    busy_users.discard(sender_nick)
-                    busy_users.discard(dest_nick)
-
+            
+            elif message.startswith("[END_CHAT]:"):
+                ended_nick = message[len("[END_CHAT]:"):].strip()
+                sender_nick = clients.get(websocket, "unknown")
+                busy_users.discard(ended_nick)
+                busy_users.discard(sender_nick)
+            
+            elif message.startswith("[CHECK_BUSY]:"):
+                dest_nick = message[len("[CHECK_BUSY]:"):].strip()
+                if dest_nick in busy_users:
+                    await safe_send(websocket, f"[BUSY]:{dest_nick}")
+                else:
+                    await safe_send(websocket, f"[FREE]:{dest_nick}")
 
             # --- Messaggi broadcast legacy ---
             else:
